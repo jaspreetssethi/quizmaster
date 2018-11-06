@@ -2,3 +2,17 @@
 quizmaster/target/
 *.class
 *.log
+
+\.vscode/settings\.json
+
+quizmaster/\.classpath
+
+quizmaster/\.project
+
+quizmaster/\.settings/org\.eclipse\.jdt\.apt\.core\.prefs
+
+quizmaster/\.settings/org\.eclipse\.jdt\.core\.prefs
+
+quizmaster/\.settings/org\.eclipse\.m2e\.core\.prefs
+
+quizmaster/dependency-reduced-pom\.xml
