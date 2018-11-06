@@ -2,7 +2,7 @@ package com.jps.quizmaster.actor
 
 import akka.actor.{Actor, ActorLogging, ActorRef, FSM, Props}
 import com.jps.quizmaster.actor.QuizMaster._
-import com.jps.quizmaster.message.{Choice, GetQuestionAnswer, QuestionAnswer, QuestionChoice}
+import com.jps.quizmaster.message._
 
 import scala.concurrent.duration._
 import akka.pattern._
@@ -11,6 +11,16 @@ import akka.util.Timeout
 import scala.util.Random
 
 class QuizMaster(minRegistration: Int, maxReadyWait: FiniteDuration, maxGameDuration: FiniteDuration, questionProvider: ActorRef)(implicit t: Timeout) extends FSM[State, Data] with ActorLogging{
+  onTransition{
+    case Buzzer -> RegistrationOpen => {
+      stateData match {
+        case Game(gameState, _, _) => {
+          gameState.keys.foreach(_.route ! NewGame)
+        }
+      }
+    }
+  }
+
   startWith(RegistrationOpen, PlayerRegistration(Nil))
 
   when(RegistrationOpen) {
@@ -65,28 +75,69 @@ class QuizMaster(minRegistration: Int, maxReadyWait: FiniteDuration, maxGameDura
       val qc = QuestionChoice(question, choice)
       val zip = players zip Stream.continually(Nil: List[Choice])
       println("Game has begun")
-      goto(Mark) using Game(zip.toMap, qca)
+      goto(Mark) using Game(zip.toMap, 0, qca)
     }
   }
 
   onTransition {
     case Ready -> Mark => nextStateData match {
-      case Game(gameState, QuestionChoiceAnswer(question, choice, _)) => {
+      case Game(gameState, _, QuestionChoiceAnswer(question, choice, _)) => {
         gameState.keys.foreach(_.route ! QuestionChoice(question, choice))
       }
     }
   }
 
   when(Mark) {
-    case Event(choice: Choice, state @ Game(gameState, _)) => {
+    case Event(choice: Choice, state @ Game(gameState, respCount, questionChoiceAnswer)) => {
       println("Got a choice from a player")
-      val newState: Map[Registration, List[Choice]] = gameState.keys.find(_.route == sender()).map{ playerRegistration =>
-        val playerChoices = choice :: gameState(playerRegistration)
-        gameState.updated(playerRegistration, playerChoices)
+      val registration = gameState.keys.find(_.route == sender())
+      val newState: Map[Registration, List[Choice]] = registration.map{ playerRegistration =>
+        val prvChoices = gameState(playerRegistration)
+        if(prvChoices.contains(choice)){
+          sender() ! ChoiceRejected("Already Selected", choice)
+          gameState
+        } else if(prvChoices.size >= questionChoiceAnswer.answer.size){
+          sender() ! ChoiceRejected("Complete Answer Already Recieved", choice)
+          gameState
+        } else {
+          val playerChoices = choice :: prvChoices
+          sender() ! ChoiceAccepted(choice)
+          gameState.updated(playerRegistration, playerChoices)
+        }
       }.fold(gameState)(identity)
 
-      stay() using state.copy(status = newState)
+      val expectedChoices = gameState.keys.size * questionChoiceAnswer.answer.size
+      if(respCount + 1 >= expectedChoices) {
+        goto(Buzzer) using state.copy(status = newState, recieved = respCount + 1)
+      } else {
+        stay() using state.copy(status = newState, recieved = respCount + 1)
+      }
     }
+  }
+
+  onTransition{
+    case Mark -> Buzzer => nextStateData match {
+      case Game(gameState, _, QuestionChoiceAnswer(_, choice, answer)) => {
+        val test = gameState.foreach( entry => {
+          val providedAnswer = entry._2.reverse
+          if(validateAnswer(providedAnswer, answer)) {
+            entry._1.route ! CorrectAnswer
+          } else {
+            entry._1.route ! WrongAnswer(providedAnswer, answer)
+          }
+        })
+      }
+    }
+  }
+
+  when(Buzzer, 10 seconds) {
+    case Event(StateTimeout, _) => {
+      goto(RegistrationOpen) using PlayerRegistration(Nil)
+    }
+  }
+
+  def validateAnswer(choices: List[Choice], answer: List[Choice]) = {
+    choices == answer
   }
 }
 
@@ -102,7 +153,7 @@ object QuizMaster {
   case class PlayerRegistration(players: List[Registration]) extends Data
   case class ReadyPlayers(players: List[Registration], ready: List[Registration]) extends Data
   case class ReadyToPlay(players: List[Registration]) extends Data
-  case class Game(status: Map[Registration, List[Choice]], qca: QuestionChoiceAnswer) extends Data
+  case class Game(status: Map[Registration, List[Choice]], recieved: Long, qca: QuestionChoiceAnswer) extends Data
 
   sealed trait Message
   case class Registration(name: String, route: ActorRef) extends Message
